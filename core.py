@@ -1,8 +1,13 @@
-import os, time, random, pickle, re
+import os
+import time
+import random
+import pickle
+import re
+import requests
 from dotenv import load_dotenv
 from groq import Groq
 from vector_store import SimpleVectorStore
-from duckduckgo_search import DDGS  # ✅ Fixed import
+from duckduckgo_search import DDGS
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -12,22 +17,116 @@ if not GROQ_API_KEY:
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Load vector stores (now using Jina AI embeddings, no local model)
+# ============================================
+# AUTO-DOWNLOAD VECTOR STORES FROM GOOGLE DRIVE
+# ============================================
+
+def download_file_from_drive(url, filename):
+    """Download a file from Google Drive using direct download URL."""
+    if os.path.exists(filename):
+        print(f"✅ {filename} already exists – skipping download")
+        return True
+    
+    print(f"📥 Downloading {filename} from Google Drive...")
+    try:
+        response = requests.get(url, stream=True, timeout=120)
+        response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        downloaded = 0
+        
+        with open(filename, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total_size > 0:
+                    percent = (downloaded / total_size) * 100
+                    print(f"  Progress: {percent:.1f}%", end='\r')
+        
+        print(f"\n✅ Downloaded {filename} ({downloaded:,} bytes)")
+        return True
+    except Exception as e:
+        print(f"⚠️ Failed to download {filename}: {e}")
+        return False
+
+def download_with_gdown(file_id, filename):
+    """Download using gdown (handles Google Drive's virus scan page)."""
+    if os.path.exists(filename):
+        print(f"✅ {filename} already exists – skipping download")
+        return True
+    
+    print(f"📥 Downloading {filename} using gdown...")
+    try:
+        import subprocess
+        subprocess.run(["pip", "install", "gdown", "-q"], check=False)
+        result = subprocess.run(
+            ["gdown", file_id, "-O", filename],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            print(f"✅ Downloaded {filename}")
+            return True
+        else:
+            print(f"⚠️ gdown failed: {result.stderr}")
+            return False
+    except Exception as e:
+        print(f"⚠️ gdown error: {e}")
+        return False
+
+# Configure your Google Drive File IDs here
+TEXTBOOK_FILE_ID = "1VOib20hX5AZCUfHNMCn-ml814GIdN_qE"  # ← Your textbook_store.pkl file ID
+MARKING_FILE_ID = "1l_wG2knBE6polk74kNWs9sqdUhRhnYBP"          # ← Add your marking_store.pkl file ID
+
+# Try direct download first, fallback to gdown if it fails
+def download_vector_stores():
+    # Download textbook_store.pkl
+    if not os.path.exists("textbook_store.pkl"):
+        direct_url = f"https://drive.google.com/uc?export=download&id={TEXTBOOK_FILE_ID}"
+        success = download_file_from_drive(direct_url, "textbook_store.pkl")
+        if not success:
+            download_with_gdown(TEXTBOOK_FILE_ID, "textbook_store.pkl")
+    
+    # Download marking_store.pkl
+    if not os.path.exists("marking_store.pkl") and MARKING_FILE_ID != "YOUR_MARKING_FILE_ID_HERE":
+        direct_url = f"https://drive.google.com/uc?export=download&id={MARKING_FILE_ID}"
+        success = download_file_from_drive(direct_url, "marking_store.pkl")
+        if not success:
+            download_with_gdown(MARKING_FILE_ID, "marking_store.pkl")
+
+# Run the download
+download_vector_stores()
+
+# ============================================
+# LOAD VECTOR STORES
+# ============================================
+
 try:
     with open("textbook_store.pkl", "rb") as f:
         textbook_store = pickle.load(f)
+    print("✅ textbook_store.pkl loaded successfully")
 except FileNotFoundError:
     print("⚠️ textbook_store.pkl not found – creating empty store")
+    textbook_store = SimpleVectorStore()
+except Exception as e:
+    print(f"⚠️ Error loading textbook_store.pkl: {e} – creating empty store")
     textbook_store = SimpleVectorStore()
 
 try:
     with open("marking_store.pkl", "rb") as f:
         marking_store = pickle.load(f)
+    print("✅ marking_store.pkl loaded successfully")
 except FileNotFoundError:
     print("⚠️ marking_store.pkl not found – creating empty store")
     marking_store = SimpleVectorStore()
+except Exception as e:
+    print(f"⚠️ Error loading marking_store.pkl: {e} – creating empty store")
+    marking_store = SimpleVectorStore()
 
-# No spellchecker – we'll skip typo correction
+# ============================================
+# CONFIGURATION
+# ============================================
+
 MIN_RELEVANCE_SCORE = 0.35
 MAX_HISTORY_TURNS = 4
 
@@ -55,7 +154,7 @@ def _cache_set(key, answer, sources, suggestions):
     _response_cache[key] = (answer, sources, suggestions, time.time())
 
 # ============================================
-# 1. INPUT PREPROCESSING (no spellcheck)
+# 1. INPUT PREPROCESSING
 # ============================================
 
 def clean_text(text):
@@ -63,7 +162,7 @@ def clean_text(text):
     return cleaned.strip()
 
 def correct_typos(text):
-    # Spellchecker removed – just return the text as is
+    # Spellchecker removed – just return text as is
     return text
 
 def detect_intent(query):
