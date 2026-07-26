@@ -2,7 +2,7 @@ import os, time, random, pickle, re
 from dotenv import load_dotenv
 from groq import Groq
 from vector_store import SimpleVectorStore
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 from spellchecker import SpellChecker
 
 load_dotenv()
