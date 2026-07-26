@@ -4,8 +4,10 @@ groq
 python-dotenv
 pypdf
 pdfplumber
-sentence-transformers
 spellchecker
 duckduckgo-search
 rank-bm25
 pydantic
+requests
+scikit-learn
+numpy
