@@ -22,7 +22,7 @@ class Query(BaseModel):
         description="Full conversation history to use for context. If provided, session_id is ignored."
     )
 
-# Session storage remains for backward compatibility, but we'll prioritize history
+# Session storage for backward compatibility
 _sessions: dict[str, list[dict]] = {}
 _session_touched: dict[str, float] = {}
 SESSION_TTL_SECONDS = 2 * 60 * 60
@@ -53,6 +53,44 @@ def _append_turn(session_id, question, answer):
     _session_touched[session_id] = time.time()
     _prune_sessions()
 
+# ============================================
+# HISTORY SAFETY VALIDATION
+# ============================================
+def _clean_history(history: list[dict] | None) -> list[dict]:
+    """Ensure all messages have a valid role and are well-formed."""
+    if not history:
+        return []
+
+    cleaned = []
+    valid_roles = {"user", "assistant", "system"}
+
+    for msg in history:
+        # Skip messages without role or content
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        content = msg.get("content")
+
+        if role is None or content is None:
+            continue
+
+        # Normalise role: "bot" → "assistant", any unknown → "user" (or drop)
+        if role not in valid_roles:
+            if role == "bot":
+                role = "assistant"
+            else:
+                # Fallback: treat as "user" to avoid breaking the API
+                role = "user"
+
+        cleaned.append({"role": role, "content": content})
+
+    # Keep only the last 20 messages to avoid token overflow (optional)
+    return cleaned[-20:]
+
+# ============================================
+# ENDPOINTS
+# ============================================
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -67,10 +105,13 @@ async def create_session():
 @app.post("/ask")
 async def ask(q: Query):
     try:
-        # Prefer client-provided history if available
+        # Validate and clean history
+        safe_history = _clean_history(q.history)
+
+        # Use client-provided history if available, else fallback to session
         if q.history is not None:
-            history = q.history
-            session_id = q.session_id or str(uuid.uuid4())  # still generate for response
+            history = safe_history
+            session_id = q.session_id or str(uuid.uuid4())
         else:
             session_id = q.session_id or str(uuid.uuid4())
             history = _get_history(session_id)
@@ -79,7 +120,7 @@ async def ask(q: Query):
             get_purnank_response, q.question, q.n_results, history, q.use_ensemble
         )
 
-        # If we used server session, append turn
+        # Only persist to session if we didn't get client history
         if q.history is None:
             _append_turn(session_id, q.question, answer)
 
