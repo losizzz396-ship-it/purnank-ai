@@ -499,6 +499,50 @@
       box-shadow: var(--shadow);
     }
 
+    /* File upload */
+    .file-upload-area {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 0;
+      flex-wrap: wrap;
+    }
+    .file-btn {
+      background: none;
+      border: 1px solid var(--paper-line);
+      border-radius: 8px;
+      padding: 4px 10px;
+      font-size: 13px;
+      cursor: pointer;
+      background: var(--white);
+      color: var(--ink-soft);
+      transition: background 0.15s, border-color 0.15s;
+      font-family: inherit;
+    }
+    .file-btn:hover {
+      background: var(--marigold-light);
+      border-color: var(--marigold);
+      color: var(--ink);
+    }
+    #fileName {
+      font-size: 13px;
+      color: var(--slate);
+      max-width: 150px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #removeFileBtn {
+      background: none;
+      border: none;
+      color: var(--danger);
+      cursor: pointer;
+      font-size: 16px;
+      line-height: 1;
+      padding: 0 4px;
+    }
+    #removeFileBtn:hover { color: #8a3a2c; }
+
     /* Input bar */
     #inputBar {
       border-top: 1px solid var(--paper-line);
@@ -510,8 +554,8 @@
       max-width: 720px;
       margin: 0 auto;
       display: flex;
-      align-items: flex-end;
-      gap: 10px;
+      flex-direction: column;
+      gap: 6px;
       background: var(--white);
       border: 1px solid var(--paper-line);
       border-radius: var(--radius);
@@ -522,6 +566,11 @@
     #inputInner:focus-within {
       border-color: var(--marigold);
       box-shadow: 0 0 0 3px rgba(212,140,44,0.1);
+    }
+    .input-row {
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
     }
     textarea#questionInput {
       flex: 1;
@@ -570,6 +619,8 @@
       #chatInner, #inputInner { padding-left: 12px; padding-right: 12px; }
       .bubble { max-width: 92%; }
       :root { --sidebar-width: 280px; }
+      .file-upload-area { gap: 4px; }
+      .file-btn { font-size: 12px; padding: 2px 8px; }
     }
   </style>
 </head>
@@ -627,12 +678,20 @@
 
   <div id="inputBar">
     <div id="inputInner">
-      <textarea id="questionInput" placeholder="Ask Purnank a question..." rows="1"></textarea>
-      <button id="sendBtn" title="Send">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-      </button>
+      <div class="file-upload-area">
+        <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.txt,.docx" style="display:none;">
+        <button class="file-btn" id="fileUploadBtn">📎 Attach</button>
+        <span id="fileName"></span>
+        <button id="removeFileBtn" style="display:none;">✕</button>
+      </div>
+      <div class="input-row">
+        <textarea id="questionInput" placeholder="Ask Purnank a question..." rows="1"></textarea>
+        <button id="sendBtn" title="Send">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+        </button>
+      </div>
+      <div class="hint">Enter to send · Shift+Enter for a new line</div>
     </div>
-    <div class="hint">Enter to send · Shift+Enter for a new line</div>
   </div>
 </div>
 
@@ -654,9 +713,16 @@
   const newChatSidebarBtn = document.getElementById('newChatSidebarBtn');
   const clearAllBtn = document.getElementById('clearAllBtn');
 
+  // File upload elements
+  const fileInput = document.getElementById('fileInput');
+  const fileUploadBtn = document.getElementById('fileUploadBtn');
+  const fileNameSpan = document.getElementById('fileName');
+  const removeFileBtn = document.getElementById('removeFileBtn');
+
   let sessionId = localStorage.getItem('purnank_session_id') || null;
   let sending = false;
   let currentConvId = localStorage.getItem('purnank_current_conv_id') || null;
+  let currentFileId = null;
 
   // -------------------- Conversation storage --------------------
   function getConversations() {
@@ -769,6 +835,38 @@
   closeSidebarBtn.addEventListener('click', closeSidebar);
   overlay.addEventListener('click', closeSidebar);
   document.addEventListener('keydown', e => { if (e.ctrlKey && e.key==='b') { e.preventDefault(); sidebar.classList.contains('open') ? closeSidebar() : openSidebar(); } if (e.key==='Escape' && sidebar.classList.contains('open')) closeSidebar(); });
+
+  // -------------------- File upload --------------------
+  fileUploadBtn.addEventListener('click', () => fileInput.click());
+
+  fileInput.addEventListener('change', async function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const resp = await fetch('/upload', {
+        method: 'POST',
+        body: formData
+      });
+      if (!resp.ok) throw new Error('Upload failed');
+      const data = await resp.json();
+      currentFileId = data.file_id;
+      fileNameSpan.textContent = `📎 ${file.name}`;
+      removeFileBtn.style.display = 'inline';
+    } catch (err) {
+      alert('File upload failed: ' + err.message);
+    }
+  });
+
+  removeFileBtn.addEventListener('click', function() {
+    currentFileId = null;
+    fileNameSpan.textContent = '';
+    this.style.display = 'none';
+    fileInput.value = '';
+  });
 
   // -------------------- Markdown renderer --------------------
   function renderMarkdown(text) {
@@ -887,7 +985,7 @@
   }
   function removeThinking() { const r = document.getElementById('thinkingRow'); if (r) r.remove(); }
 
-  // -------------------- Send message (with role mapping) --------------------
+  // -------------------- Send message (with file support) --------------------
   async function sendMessage(text) {
     if (!text.trim() || sending) return;
     sending = true;
@@ -902,7 +1000,7 @@
     const cls = sessionClass.value;
     if (cls) question = `[Class ${cls}] ${question}`;
 
-    // ✅ Fix: map "bot" → "assistant" for Groq API compatibility
+    // Build history with role mapping
     const history = conv.messages.map(msg => ({
       role: msg.role === "bot" ? "assistant" : msg.role,
       content: msg.content
@@ -918,7 +1016,8 @@
           n_results: 3,
           session_id: sessionId,
           use_ensemble: ensembleToggle.checked,
-          history: trimmedHistory
+          history: trimmedHistory,
+          file_id: currentFileId   // <-- attach file if present
         })
       });
       if (!resp.ok) {
@@ -934,6 +1033,12 @@
       current.messages.push({ role: 'user', content: text });
       current.messages.push({ role: 'assistant', content: data.answer });
       saveCurrentConv(current.messages);
+
+      // Clear file attachment after sending (optional)
+      // currentFileId = null;
+      // fileNameSpan.textContent = '';
+      // removeFileBtn.style.display = 'none';
+      // fileInput.value = '';
     } catch (err) {
       removeThinking();
       const row = document.createElement('div');
@@ -972,6 +1077,11 @@
     renderConversationList();
     closeSidebar();
     input.focus();
+    // Clear file attachment
+    currentFileId = null;
+    fileNameSpan.textContent = '';
+    removeFileBtn.style.display = 'none';
+    fileInput.value = '';
   }
   newChatBtn.addEventListener('click', startNewChat);
   newChatSidebarBtn.addEventListener('click', startNewChat);
