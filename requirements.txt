@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+groq
+python-dotenv
+pypdf
+pdfplumber
+sentence-transformers
+spellchecker
+duckduckgo-search
+rank-bm25
+pydantic
