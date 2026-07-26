@@ -4,6 +4,7 @@ import random
 import pickle
 import re
 import requests
+import tiktoken
 from dotenv import load_dotenv
 from groq import Groq
 from vector_store import SimpleVectorStore
@@ -18,10 +19,31 @@ if not GROQ_API_KEY:
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # ============================================
+# TOKEN COUNTER
+# ============================================
+def count_tokens(text, model="gpt-4"):
+    """Count tokens in a string using tiktoken."""
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        encoding = tiktoken.get_encoding("cl100k_base")
+    return len(encoding.encode(text))
+
+def truncate_text(text, max_tokens=500):
+    """Truncate text to roughly max_tokens."""
+    if count_tokens(text) <= max_tokens:
+        return text
+    # Truncate by characters (rough approximation)
+    # 1 token ≈ 4 chars for English
+    char_limit = max_tokens * 4
+    if len(text) > char_limit:
+        return text[:char_limit] + "..."
+    return text
+
+# ============================================
 # AUTO-DOWNLOAD VECTOR STORES FROM GOOGLE DRIVE
 # ============================================
 
-# ✅ CORRECT FILE IDs
 TEXTBOOK_FILE_ID = "1wOOkirTYE_G0Vk3s5BLHIgn2SXcuGAt-"
 MARKING_FILE_ID = "12zUp7_EbwnW0gX_xSbSGdMiNusNo9Abd"
 
@@ -109,13 +131,14 @@ except Exception as e:
 
 MIN_RELEVANCE_SCORE = 0.35
 MAX_HISTORY_TURNS = 4
+MAX_CONTEXT_TOKENS = 4000  # Leave room for system prompt, history, and response
 
 # ============================================
 # 0. LIGHTWEIGHT RESPONSE CACHE
 # ============================================
 _response_cache = {}
 _CACHE_MAX_SIZE = 500
-_CACHE_TTL_SECONDS = 6 * 60 * 60  # 6 hours
+_CACHE_TTL_SECONDS = 6 * 60 * 60
 
 def _cache_get(key):
     entry = _response_cache.get(key)
@@ -142,7 +165,7 @@ def clean_text(text):
     return cleaned.strip()
 
 def correct_typos(text):
-    return text  # spellchecker removed for simplicity
+    return text
 
 def detect_intent(query):
     query_lower = query.lower()
@@ -219,7 +242,7 @@ def search_web(query):
         return ""
 
 # ============================================
-# 3. LLM CALL (Groq)
+# 3. LLM CALL (Groq) WITH TOKEN MANAGEMENT
 # ============================================
 
 SYSTEM_PROMPT = """You are Purnank, a friendly, expert CBSE exam coach for Class 10 and 12 students.
@@ -324,6 +347,26 @@ ENSEMBLE_MODELS = [
 JUDGE_MODEL = "openai/gpt-oss-120b"
 
 def call_llm(prompt, history=None, retries=3, model=DEFAULT_MODEL):
+    # Truncate prompt if too long (rough estimate)
+    if count_tokens(prompt) > MAX_CONTEXT_TOKENS:
+        # Reduce by cutting the reference material
+        lines = prompt.split('\n')
+        # Find where the reference material starts
+        ref_start = None
+        for i, line in enumerate(lines):
+            if 'REFERENCE MATERIAL:' in line:
+                ref_start = i + 2
+                break
+        if ref_start and ref_start < len(lines):
+            # Keep the first few chunks, truncate the rest
+            before_ref = lines[:ref_start]
+            ref_lines = lines[ref_start:]
+            # Keep first 30 reference lines (approx 500-800 words)
+            truncated_ref = ref_lines[:30]
+            if len(ref_lines) > 30:
+                truncated_ref.append("... (additional content truncated to save tokens)")
+            prompt = '\n'.join(before_ref + truncated_ref)
+    
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     if history:
         messages.extend(history[-(MAX_HISTORY_TURNS * 2):])
@@ -335,13 +378,14 @@ def call_llm(prompt, history=None, retries=3, model=DEFAULT_MODEL):
                 model=model,
                 messages=messages,
                 temperature=0.7,
-                max_tokens=1500
+                max_tokens=1200  # Reduced to leave room for context
             )
             return response.choices[0].message.content
         except Exception as e:
-            if 'rate limit' in str(e).lower() or '429' in str(e):
+            error_msg = str(e).lower()
+            if 'rate limit' in error_msg or '429' in error_msg or 'tokens' in error_msg:
                 wait = (2 ** attempt) + random.random()
-                print(f"⏳ Rate limit. Retry in {wait:.1f}s")
+                print(f"⏳ Token rate limit. Retry in {wait:.1f}s")
                 time.sleep(wait)
             else:
                 raise
@@ -415,7 +459,7 @@ def call_llm_stream(prompt, history=None):
         model=DEFAULT_MODEL,
         messages=messages,
         temperature=0.7,
-        max_tokens=1500,
+        max_tokens=1200,
         stream=True
     )
     for chunk in stream:
@@ -441,41 +485,45 @@ def build_context(query_info, n=3):
     if cls:
         filters["class"] = cls
 
-    tb = textbook_store.query(corrected, n + 2, filters=filters or None, min_score=MIN_RELEVANCE_SCORE, rerank=False)
-    mk = marking_store.query(corrected, n, filters=filters or None, min_score=MIN_RELEVANCE_SCORE, rerank=False)
+    # Fetch fewer results to reduce token usage
+    tb = textbook_store.query(corrected, min(n + 1, 3), filters=filters or None, min_score=MIN_RELEVANCE_SCORE, rerank=False)
+    mk = marking_store.query(corrected, min(n, 2), filters=filters or None, min_score=MIN_RELEVANCE_SCORE, rerank=False)
 
     if filters and not tb['documents'][0]:
-        tb = textbook_store.query(corrected, n + 2, min_score=MIN_RELEVANCE_SCORE, rerank=False)
+        tb = textbook_store.query(corrected, min(n + 1, 3), min_score=MIN_RELEVANCE_SCORE, rerank=False)
     if filters and not mk['documents'][0]:
-        mk = marking_store.query(corrected, n, min_score=MIN_RELEVANCE_SCORE, rerank=False)
+        mk = marking_store.query(corrected, min(n, 2), min_score=MIN_RELEVANCE_SCORE, rerank=False)
 
     if tb['documents'][0]:
         context += "\n📖 From NCERT Textbooks (this is your primary source — build your answer from this):\n"
         for i, doc in enumerate(tb['documents'][0]):
+            # Truncate each chunk to save tokens
+            truncated_doc = truncate_text(doc, 300)
             meta = tb['metadatas'][0][i]
             loc = f" (p.{meta['page']})" if meta.get('page') else ""
-            context += f"\n  --- Passage {i+1}: [{meta.get('source', 'NCERT')}{loc}] ---\n  {doc}\n"
+            context += f"\n  --- Passage {i+1}: [{meta.get('source', 'NCERT')}{loc}] ---\n  {truncated_doc}\n"
             sources.append({
                 "type": "textbook",
                 "source": meta.get('source', 'NCERT'),
                 "page": meta.get('page'),
                 "subject": meta.get('subject'),
                 "class": meta.get('class'),
-                "snippet": doc[:350] + ('...' if len(doc) > 350 else '')
+                "snippet": truncated_doc[:350] + ('...' if len(truncated_doc) > 350 else '')
             })
 
     if mk['documents'][0]:
         context += "\n📝 From CBSE Marking Schemes:\n"
         for i, doc in enumerate(mk['documents'][0]):
             ans = mk['metadatas'][0][i].get('answer', 'N/A')
-            context += f"  Q: {doc}\n  ✅ Answer: {ans}\n"
+            truncated_ans = truncate_text(ans, 150)
+            context += f"  Q: {doc}\n  ✅ Answer: {truncated_ans}\n"
             sources.append({
                 "type": "marking_scheme",
                 "source": "CBSE Marking Scheme",
                 "page": None,
                 "subject": mk['metadatas'][0][i].get('subject'),
                 "class": mk['metadatas'][0][i].get('class'),
-                "snippet": f"Q: {doc[:150]}...\nA: {ans[:200]}..."
+                "snippet": f"Q: {doc[:150]}...\nA: {truncated_ans[:200]}..."
             })
 
     if intent == "current" or (not tb['documents'][0] and not mk['documents'][0]):
