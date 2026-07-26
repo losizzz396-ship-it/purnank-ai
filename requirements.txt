@@ -4,9 +4,11 @@ groq
 python-dotenv
 pypdf
 pdfplumber
+spellchecker
 duckduckgo-search
 rank-bm25
 pydantic
 requests
 scikit-learn
 numpy
+tiktoken
