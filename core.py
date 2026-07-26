@@ -2,8 +2,7 @@ import os, time, random, pickle, re
 from dotenv import load_dotenv
 from groq import Groq
 from vector_store import SimpleVectorStore
-from duckduckgo_search import DDGS
-from spellchecker import SpellChecker
+from duckduckgo_search import DDGS  # ✅ Fixed import
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -13,22 +12,31 @@ if not GROQ_API_KEY:
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Load vector stores
-with open("textbook_store.pkl", "rb") as f:
-    textbook_store = pickle.load(f)
-with open("marking_store.pkl", "rb") as f:
-    marking_store = pickle.load(f)
+# Load vector stores (now using Jina AI embeddings, no local model)
+try:
+    with open("textbook_store.pkl", "rb") as f:
+        textbook_store = pickle.load(f)
+except FileNotFoundError:
+    print("⚠️ textbook_store.pkl not found – creating empty store")
+    textbook_store = SimpleVectorStore()
 
-_spell = SpellChecker()
+try:
+    with open("marking_store.pkl", "rb") as f:
+        marking_store = pickle.load(f)
+except FileNotFoundError:
+    print("⚠️ marking_store.pkl not found – creating empty store")
+    marking_store = SimpleVectorStore()
+
+# No spellchecker – we'll skip typo correction
 MIN_RELEVANCE_SCORE = 0.35
 MAX_HISTORY_TURNS = 4
 
 # ============================================
-# CACHE
+# 0. LIGHTWEIGHT RESPONSE CACHE
 # ============================================
 _response_cache = {}
 _CACHE_MAX_SIZE = 500
-_CACHE_TTL_SECONDS = 6 * 60 * 60
+_CACHE_TTL_SECONDS = 6 * 60 * 60  # 6 hours
 
 def _cache_get(key):
     entry = _response_cache.get(key)
@@ -47,22 +55,16 @@ def _cache_set(key, answer, sources, suggestions):
     _response_cache[key] = (answer, sources, suggestions, time.time())
 
 # ============================================
-# PREPROCESSING
+# 1. INPUT PREPROCESSING (no spellcheck)
 # ============================================
+
 def clean_text(text):
     cleaned = re.sub(r'[^\w\s.,?!\'"()-]', '', text)
     return cleaned.strip()
 
 def correct_typos(text):
-    words = text.split()
-    corrected_words = []
-    for word in words:
-        if len(word) <= 2 or word.lower() in _spell:
-            corrected_words.append(word)
-        else:
-            corrected = _spell.correction(word)
-            corrected_words.append(corrected if corrected else word)
-    return " ".join(corrected_words)
+    # Spellchecker removed – just return the text as is
+    return text
 
 def detect_intent(query):
     query_lower = query.lower()
@@ -119,8 +121,9 @@ def preprocess_query(query):
     }
 
 # ============================================
-# WEB SEARCH
+# 2. WEB SEARCH (DuckDuckGo)
 # ============================================
+
 def search_web(query):
     results = ""
     try:
@@ -138,8 +141,9 @@ def search_web(query):
         return ""
 
 # ============================================
-# LLM CALLS
+# 3. LLM CALL (Groq)
 # ============================================
+
 SYSTEM_PROMPT = """You are Purnank, a friendly, expert CBSE exam coach for Class 10 and 12 students.
 
 YOUR AUDIENCE: school students, typically teenagers. Keep everything encouraging,
@@ -342,7 +346,7 @@ def call_llm_stream(prompt, history=None):
             yield delta
 
 # ============================================
-# CORE RESPONSE ENGINE
+# 4. CORE RESPONSE ENGINE
 # ============================================
 
 def build_context(query_info, n=3):
@@ -359,13 +363,14 @@ def build_context(query_info, n=3):
     if cls:
         filters["class"] = cls
 
-    tb = textbook_store.query(corrected, n + 2, filters=filters or None, min_score=MIN_RELEVANCE_SCORE, rerank=True)
-    mk = marking_store.query(corrected, n, filters=filters or None, min_score=MIN_RELEVANCE_SCORE, rerank=True)
+    # Rerank is False because we no longer have the cross-encoder
+    tb = textbook_store.query(corrected, n + 2, filters=filters or None, min_score=MIN_RELEVANCE_SCORE, rerank=False)
+    mk = marking_store.query(corrected, n, filters=filters or None, min_score=MIN_RELEVANCE_SCORE, rerank=False)
 
     if filters and not tb['documents'][0]:
-        tb = textbook_store.query(corrected, n + 2, min_score=MIN_RELEVANCE_SCORE, rerank=True)
+        tb = textbook_store.query(corrected, n + 2, min_score=MIN_RELEVANCE_SCORE, rerank=False)
     if filters and not mk['documents'][0]:
-        mk = marking_store.query(corrected, n, min_score=MIN_RELEVANCE_SCORE, rerank=True)
+        mk = marking_store.query(corrected, n, min_score=MIN_RELEVANCE_SCORE, rerank=False)
 
     if tb['documents'][0]:
         context += "\n📖 From NCERT Textbooks (this is your primary source — build your answer from this):\n"
@@ -500,7 +505,6 @@ Always:
                 suggestions.append(line[2:].strip())
         suggestions = suggestions[:3]
     
-    # Fallback suggestions if the model didn't generate any
     if not suggestions:
         suggestions = [
             "Explain this in simpler terms",
