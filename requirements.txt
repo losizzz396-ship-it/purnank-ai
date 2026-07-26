@@ -12,3 +12,7 @@ requests
 scikit-learn
 numpy
 tiktoken
+python-docx
+pdf2image
+pytesseract
+Pillow
